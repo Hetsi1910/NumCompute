@@ -5,9 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "numcompute"
 version = "0.1.0"
-description = "Modular scientific computing toolkit using plain Python and NumPy"
+description = "Modular scientific computing toolkit using plain Python and NumPy (+ NumCompute-Stream)"
 requires-python = ">=3.9"
-dependencies = ["numpy>=1.24"]
+dependencies = ["numpy>=1.24", "matplotlib>=3.7"]
 
 [project.optional-dependencies]
 dev = ["pytest", "jupyter"]
@@ -17,3 +17,4 @@ include = ["numcompute*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
