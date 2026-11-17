@@ -18,11 +18,107 @@ from typing import Deque, Dict, Optional, Tuple
 
 import numpy as np
 
-from numcompute.stats import RunningStats, quantile as _batch_quantile
+from numcompute.stats import RunningStats as _BatchRunningStats, quantile as _batch_quantile
 
 from .utils import as_float_array, check_positive_int
 
-__all__ = ["StreamStats", "RunningStats"]
+__all__ = ["StreamStats", "RunningStats", "update_stats"]
+
+
+class RunningStats(_BatchRunningStats):
+    """Welford/Chan running mean and variance, stabilised against offsets and tiny scales.
+
+    Extends :class:`numcompute.stats.RunningStats`. Every feature is internally centred on its first observed
+    value (``shift``) and divided by the size of its first non-zero spread (``unit``) before the usual Welford
+    update, i.e. the "shifted data" algorithm. This matters in two situations where the plain update loses
+    accuracy:
+
+    * **large offsets** - for data like ``1e9 + noise`` the running mean needs ~1e-7 absolute resolution
+      that a float64 near 1e9 cannot provide; centring first keeps all intermediate values small.
+    * **tiny scales** - squaring deviations of order ``1e-200`` underflows to 0, so the spread would vanish.
+
+    The public API (``update``, ``merge``, ``count``, ``mean``, ``var``, ``std``) is unchanged.
+
+    Notes
+    -----
+    ``var`` is returned in the original units and can itself underflow for spreads below ~1e-154; ``std`` is
+    computed from the rescaled variance and stays accurate. Time/space are those of the parent class.
+
+    Examples
+    --------
+    >>> rs = RunningStats().update([[1e9 + 1.0], [1e9 + 2.0], [1e9 + 3.0]])
+    >>> float(rs.mean[0]), round(float(rs.var()[0]), 6)
+    (1000000002.0, 0.666667)
+    """
+
+    def _init(self, n_features: int) -> None:
+        super()._init(n_features)
+        self._shift = np.zeros(n_features)
+        self._shift_set = np.zeros(n_features, dtype=bool)
+        self._unit = np.ones(n_features)
+        self._unit_set = np.zeros(n_features, dtype=bool)
+
+    def update(self, x) -> "RunningStats":
+        """Add a batch (NaN ignored). See :meth:`numcompute.stats.RunningStats.update`."""
+        arr = as_float_array(x, name="x", ndim=(1, 2))
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        if self.n_features_ is None:
+            self._init(arr.shape[1])
+        elif arr.shape[1] != self.n_features_:
+            raise ValueError(f"x has {arr.shape[1]} features, but earlier batches had {self.n_features_}")
+        if arr.shape[0] == 0:
+            return self
+        valid = ~np.isnan(arr)
+        fresh = ~self._shift_set & valid.any(axis=0)
+        if fresh.any():
+            first = arr[np.argmax(valid, axis=0), np.arange(arr.shape[1])]
+            self._shift = np.where(fresh, first, self._shift)
+            self._shift_set |= fresh
+        centred = arr - self._shift
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            spread = np.nanmax(np.abs(centred), axis=0)
+        # a feature that has only been constant so far has zero state, so its unit may still be chosen
+        adopt = ~self._unit_set & np.isfinite(spread) & (spread > 0)
+        self._unit = np.where(adopt, spread, self._unit)
+        self._unit_set |= adopt
+        super().update(centred / self._unit)
+        return self
+
+    def merge(self, other: "RunningStats") -> "RunningStats":
+        """Combine another stabilised ``RunningStats`` into this one (frames are aligned first)."""
+        if not isinstance(other, RunningStats):
+            raise TypeError("other must be a numcompute_stream.stats.RunningStats")
+        if other.n_features_ is None:
+            return self
+        if self.n_features_ is None:
+            self._init(other.n_features_)
+        elif self.n_features_ != other.n_features_:
+            raise ValueError(f"feature counts differ: {self.n_features_} and {other.n_features_}")
+        take = ~self._shift_set & other._shift_set
+        self._shift = np.where(take, other._shift, self._shift)
+        self._shift_set |= take
+        adopt = ~self._unit_set & other._unit_set
+        self._unit = np.where(adopt, other._unit, self._unit)
+        self._unit_set |= adopt
+        mean_b = (other._shift - self._shift + other._unit * other._mean) / self._unit
+        m2_b = other._m2 * (other._unit / self._unit) ** 2
+        self._merge(other._n, mean_b, m2_b)
+        return self
+
+    @property
+    def mean(self) -> np.ndarray:
+        """Running mean per feature in the original units (NaN where nothing was observed)."""
+        return self._shift + self._unit * super().mean
+
+    def var(self, ddof: int = 0) -> np.ndarray:
+        """Running variance per feature in the original units."""
+        return super().var(ddof) * self._unit**2
+
+    def std(self, ddof: int = 0) -> np.ndarray:
+        """Running standard deviation, computed from the rescaled variance so it cannot underflow."""
+        return np.sqrt(super().var(ddof)) * self._unit
 
 
 class StreamStats:

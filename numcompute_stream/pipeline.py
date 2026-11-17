@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+import inspect
+from typing import Any, Callable
 
 import numpy as np
 
@@ -15,6 +16,23 @@ __all__ = ["Pipeline", "BaseEstimator", "Transformer", "Estimator"]
 BaseEstimator = _nc.BaseEstimator
 Transformer = _nc.Transformer
 Estimator = _nc.Estimator
+
+
+def _accepts_y(method: Callable) -> bool:
+    """True if ``method(X, y)`` is a valid call (second positional parameter or ``*args``)."""
+    try:
+        params = list(inspect.signature(method).parameters.values())
+    except (TypeError, ValueError):  # builtins / C extensions without a signature
+        return True
+    if any(p.kind is p.VAR_POSITIONAL for p in params):
+        return True
+    positional = [p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    return len(positional) >= 2
+
+
+def _call(method: Callable, X, y):
+    """Call ``method(X, y)`` or ``method(X)`` depending on what the step's signature supports."""
+    return method(X, y) if _accepts_y(method) else method(X)
 
 
 class Pipeline(_nc.Pipeline):
@@ -43,6 +61,23 @@ class Pipeline(_nc.Pipeline):
     ...                  ("model", DecisionTreeClassifier(max_depth=5, buffer_size=500))])
     >>> # pipe.partial_fit(X_chunk, y_chunk)
     """
+
+    # -- batch fitting: dispatch on signatures so minimal ``fit(X)`` / ``fit_transform(X)`` steps work ---------
+    def _fit_intermediate(self, X, y):
+        Xt = X
+        for _, step in self.steps[:-1]:
+            if hasattr(step, "fit_transform"):
+                Xt = _call(step.fit_transform, Xt, y)
+            else:
+                _call(step.fit, Xt, y)
+                Xt = step.transform(Xt)
+        return Xt
+
+    def fit(self, X, y=None) -> "Pipeline":
+        """Fit every step in order (steps whose ``fit`` takes only ``X`` are called without ``y``)."""
+        Xt = self._fit_intermediate(X, y)
+        _call(self.steps[-1][1].fit, Xt, y)
+        return self
 
     @property
     def supports_streaming(self) -> bool:
@@ -78,13 +113,13 @@ class Pipeline(_nc.Pipeline):
                 )
         Xt, yt = check_X_y(X, y) if y is not None else (check_X_y(X)[0], None)
         for name, step in self.steps[:-1]:
-            step.partial_fit(Xt, yt)
+            _call(step.partial_fit, Xt, yt)
             Xt = step.transform(Xt)
         last = self.steps[-1][1]
         if yt is None:
             last.partial_fit(Xt)
         else:
-            last.partial_fit(Xt, yt)
+            _call(last.partial_fit, Xt, yt)
         return self
 
     def predict_proba(self, X):

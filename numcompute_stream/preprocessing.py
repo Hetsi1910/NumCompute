@@ -108,6 +108,7 @@ class StandardScaler(_nc.StandardScaler):
         if self.momentum is None:
             self._rs.update(X)
             mean, var = np.nan_to_num(self._rs.mean, nan=0.0), np.nan_to_num(self._rs.var(), nan=0.0)
+            scale = np.nan_to_num(self._rs.std(), nan=0.0)  # from the rescaled variance: no underflow
             self.n_samples_seen_ = self._rs.count
         else:
             batch = RunningStats().update(X)
@@ -124,8 +125,10 @@ class StandardScaler(_nc.StandardScaler):
                     has, (1 - a) * v0 + a * np.nan_to_num(vb) + a * (1 - a) * (np.nan_to_num(mb) - m0) ** 2, v0
                 )
             self.n_samples_seen_ = batch.count
-        scale = np.sqrt(var)
-        scale = np.where(scale <= 10 * _EPS * np.maximum(1.0, np.abs(mean)), 1.0, scale)
+            scale = np.sqrt(var)
+        # A column is "constant" only if its spread is round-off relative to its own magnitude. An absolute
+        # threshold would wrongly flatten genuine data measured in tiny units (e.g. values around 1e-20).
+        scale = np.where(scale <= 10 * _EPS * np.abs(mean), 1.0, scale)
         self.mean_, self.var_, self.scale_ = mean, var, scale
         return self
 
@@ -144,6 +147,14 @@ class MinMaxScaler(_nc.MinMaxScaler):
     only the statistics, not past output, are updated. NaN is ignored.
     """
 
+    def _check_range(self) -> None:
+        try:
+            low, high = (float(v) for v in self.feature_range)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("feature_range must be a (low, high) pair of numbers") from exc
+        if not (np.isfinite(low) and np.isfinite(high)):
+            raise ValueError(f"feature_range must be finite, got {self.feature_range!r}")
+
     def fit(self, X, y=None) -> "MinMaxScaler":
         """Reset and fit on ``X``."""
         self.__dict__.pop("_running", None)
@@ -155,8 +166,10 @@ class MinMaxScaler(_nc.MinMaxScaler):
         Raises
         ------
         ValueError
-            If the feature count changes or the input is invalid.
+            If the feature count changes, the input is invalid or ``feature_range``
+            is not a finite ``low < high`` pair.
         """
+        self._check_range()
         X = _prepare_chunk(X)
         _check_width(self, X)
         if X.shape[0] == 0 and "_running" not in self.__dict__:
@@ -243,6 +256,8 @@ class Imputer(_nc.Imputer):
         """
         if self.strategy not in self._STRATEGIES:
             raise ValueError(f"strategy must be one of {self._STRATEGIES}, got {self.strategy!r}")
+        if not np.isfinite(self.fill_value):
+            raise ValueError(f"fill_value must be finite, got {self.fill_value!r}")
         X = check_2d(X, "X_chunk")
         _check_width(self, X)
         first = not hasattr(self, "n_features_in_")
@@ -259,6 +274,8 @@ class Imputer(_nc.Imputer):
         if X.shape[0] == 0 or self.strategy == "constant":
             return self
         mask = self._mask(X)
+        if np.isinf(np.where(mask, 0.0, X)).any():
+            raise ValueError("X_chunk contains infinity; clip or remove infinite values first")
         Xm = np.where(mask, np.nan, X)
         if self.strategy == "mean":
             self._rs.update(Xm)

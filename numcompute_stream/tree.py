@@ -71,9 +71,9 @@ def impurity(counts, criterion: str = "gini") -> np.ndarray:
 
 
 def _threshold_between(lo: float, hi: float) -> float:
-    """Midpoint of two consecutive distinct values, never equal to ``hi``."""
-    thr = lo + (hi - lo) / 2.0
-    return lo if thr >= hi else thr
+    """Overflow-safe midpoint of two consecutive distinct values; never equal to ``hi``."""
+    thr = 0.5 * lo + 0.5 * hi  # halving first avoids overflow of (hi - lo) near +-1e308
+    return thr if lo <= thr < hi else lo
 
 
 def best_split_vectorised(
@@ -299,8 +299,9 @@ class DecisionTreeClassifier(Estimator):
         check_positive_int(self.min_samples_split, "min_samples_split", minimum=2)
         check_positive_int(self.min_samples_leaf, "min_samples_leaf", minimum=1)
         check_positive_int(self.buffer_size, "buffer_size", minimum=1)
-        if not isinstance(self.min_impurity_decrease, (int, float, np.floating)) or self.min_impurity_decrease < 0:
-            raise ValueError(f"min_impurity_decrease must be a number >= 0, got {self.min_impurity_decrease!r}")
+        mid = self.min_impurity_decrease
+        if not isinstance(mid, (int, float, np.floating)) or not np.isfinite(mid) or mid < 0:
+            raise ValueError(f"min_impurity_decrease must be a finite number >= 0, got {mid!r}")
         mf = self.max_features
         if mf is not None and not (
             (isinstance(mf, str) and mf in ("sqrt", "log2"))
