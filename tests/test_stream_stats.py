@@ -119,3 +119,16 @@ def test_reset_and_summary_and_functional_api(X):
     assert set(summ) == {"count", "mean", "std", "min", "q25", "median", "q75", "max"}
     s.reset()
     assert s.n_features_ is None and s.n_chunks_ == 0
+
+
+def test_reservoir_is_uniform_over_the_whole_stream():
+    # Algorithm R keeps each of N items with equal probability cap/N, so about half of the sample must come
+    # from the second half of a sorted stream (a biased sampler keeps mostly early or mostly late values).
+    n, cap = 10_000, 400
+    s = StreamStats(reservoir_size=cap, seed=5)
+    for chunk in np.array_split(np.arange(n, dtype=float).reshape(-1, 1), 50):
+        s.update_stats(chunk)
+    sample = s._res[: s._res_n, 0]
+    assert 0.4 < np.mean(sample >= n / 2) < 0.6
+    assert np.isclose(sample.mean(), n / 2, rtol=0.1)
+    assert abs(float(s.quantile(0.5)[0]) - n / 2) < 0.1 * n

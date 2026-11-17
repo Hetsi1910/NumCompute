@@ -346,3 +346,35 @@ def test_get_set_params_roundtrip():
     assert t.get_params()["buffer_size"] == 500
     t.set_params(buffer_size=50)
     assert t.buffer_size == 50
+
+
+@pytest.mark.parametrize("vectorised", [True, False])
+def test_tie_between_thresholds_of_one_feature_takes_lowest(vectorised):
+    # cutting after the first or after the last sample gives exactly the same impurity -> lowest threshold wins
+    X = np.array([[0.0], [1.0], [2.0], [3.0]])
+    y = np.array([0, 1, 1, 0])
+    t = DecisionTreeClassifier(max_depth=1, vectorised=vectorised).fit(X, y)
+    assert t.tree_["threshold"][0] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("vectorised", [True, False])
+def test_tie_between_features_takes_lowest_index_even_when_later_one_is_listed_last(vectorised):
+    X = np.array([[0.0, 5.0, 9.0], [1.0, 6.0, 8.0], [2.0, 7.0, 7.0], [3.0, 8.0, 6.0]])
+    y = np.array([0, 0, 1, 1])
+    t = DecisionTreeClassifier(max_depth=1, vectorised=vectorised).fit(X, y)
+    assert t.tree_["feature"][0] == 0
+
+
+def test_prediction_nan_uses_training_median_not_zero():
+    X = np.array([[1.0], [2.0], [3.0], [10.0], [11.0], [12.0], [13.0]])
+    y = np.array([0, 0, 0, 1, 1, 1, 1])
+    t = DecisionTreeClassifier().fit(X, y)
+    assert t.nan_fill_[0] == 10.0
+    assert t.predict([[np.nan]]).tolist() == [1]  # median 10 lies right of the threshold; 0 would go left
+
+
+def test_training_nan_rows_follow_the_median_branch():
+    X = np.array([[1.0], [2.0], [np.nan], [10.0], [11.0], [np.nan]])
+    y = np.array([0, 0, 1, 1, 1, 1])
+    t = DecisionTreeClassifier().fit(X, y)
+    assert t.nan_fill_[0] == 6.0 and t.score(X, y) == 1.0
